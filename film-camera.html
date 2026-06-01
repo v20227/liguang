@@ -302,18 +302,27 @@
     // ========================================================
     // 5. renderFrame — 渲染一帧（复用纹理对象）
     // ========================================================
+    // 2D Canvas 中转（iOS 兼容：不支持 video → texImage2D）
+    const bridgeCanvas = document.createElement('canvas');
+    const bridgeCtx = bridgeCanvas.getContext('2d', { willReadFrequently: false });
+
     function renderFrame() {
       const w = video.videoWidth || 640;
       const h = video.videoHeight || 480;
       if (canvas.width !== w || canvas.height !== h) {
         canvas.width = w;
         canvas.height = h;
+        bridgeCanvas.width = w;
+        bridgeCanvas.height = h;
         gl.viewport(0, 0, w, h);
       }
 
-      // 复用 videoTexture，只用 texImage2D 更新内容
+      // 第一步：把 video 画到 2D canvas（iOS 兼容）
+      bridgeCtx.drawImage(video, 0, 0, w, h);
+
+      // 第二步：把 2D canvas 上传到 WebGL 纹理
       gl.bindTexture(gl.TEXTURE_2D, videoTexture);
-      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, w, h, 0, gl.RGBA, gl.UNSIGNED_BYTE, video);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, bridgeCanvas);
 
       gl.activeTexture(gl.TEXTURE0);
       gl.bindTexture(gl.TEXTURE_2D, videoTexture);

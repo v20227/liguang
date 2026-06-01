@@ -4,192 +4,319 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no, viewport-fit=cover">
   <meta name="apple-mobile-web-app-capable" content="yes">
-  <title>胶片相机 · iOS 诊断</title>
+  <title>胶片相机</title>
   <style>
     * { margin:0; padding:0; box-sizing:border-box; }
-    body { background:#000; color:#fff; font-family:system-ui; padding:20px; }
-    #log { background:rgba(0,0,0,0.8); border:1px solid #333; border-radius:8px; padding:12px; font-size:12px; font-family:monospace; max-height:300px; overflow-y:auto; margin-bottom:15px; }
-    #log div { padding:2px 0; }
-    #preview { width:100%; max-width:400px; background:#111; border-radius:8px; overflow:hidden; margin:10px 0; }
-    video { width:100%; display:block; }
-    canvas { width:100%; display:block; background:#222; }
-    button { padding:10px 20px; border-radius:20px; border:none; background:#d4a657; color:#000; font-size:14px; margin:5px; cursor:pointer; }
-    .row { display:flex; gap:10px; flex-wrap:wrap; align-items:center; margin:8px 0; }
-    .box { background:#111; border-radius:8px; padding:10px; margin:5px 0; }
-    .green { color:#0f0; }
-    .red { color:#f00; }
-    .yellow { color:#ff0; }
+    body { background:#000; height:100vh; display:flex; flex-direction:column; align-items:center; justify-content:center; font-family:system-ui; overflow:hidden; }
+    #viewfinder { position:relative; width:100%; max-width:800px; aspect-ratio:4/3; background:#222; border-radius:12px; overflow:hidden; display:flex; align-items:center; justify-content:center; color:#555; font-size:14px; }
+    canvas { position:absolute; top:0; left:0; width:100%; height:100%; }
+    video { display:none; }
+    .controls { display:flex; justify-content:center; gap:20px; margin:15px 0; flex-wrap:wrap; }
+    button { padding:12px 24px; border-radius:30px; border:none; background:rgba(255,255,255,0.15); color:#fff; font-size:16px; backdrop-filter:blur(10px); cursor:pointer; transition:0.2s; }
+    button.active { background:#d4a657; color:#000; }
+    #shutter { width:70px; height:70px; border-radius:50%; background:white; border:5px solid #555; margin:10px; cursor:pointer; }
+    #shutter:active { transform:scale(0.95); }
+    .bottom-bar { display:flex; align-items:center; gap:20px; }
+    #modeLabel { color:#aaa; font-size:14px; min-width:60px; text-align:center; }
   </style>
 </head>
 <body>
-  <h2>🎞 胶片相机 · 诊断</h2>
-  <div class="row">
-    <button id="btnCamera">📷 启动摄像头</button>
-    <button id="btnTest">🧪 测试WebGL渲染</button>
+  <div id="viewfinder">
+    <span id="hint">点击下方按钮启动相机</span>
+    <canvas id="outputCanvas"></canvas>
+    <video id="video" playsinline autoplay muted></video>
   </div>
-  <div id="log">等待操作...</div>
-
-  <div class="box">
-    <div>视频预览 (video 元素)</div>
-    <div id="preview"><video id="video" playsinline autoplay muted style="display:none;"></video></div>
+  <div class="controls">
+    <button id="styleFuji" class="active">富士</button>
+    <button id="styleRicoh">理光</button>
+    <button id="switchCamera">🔄 翻转</button>
   </div>
-
-  <div class="box">
-    <div>WebGL 输出 (canvas)</div>
-    <canvas id="output"></canvas>
+  <div class="bottom-bar">
+    <span id="modeLabel">📷 拍照</span>
+    <div id="shutter"></div>
+    <span style="width:60px;"></span>
   </div>
 
   <script>
-    const video = document.getElementById('video');
-    const canvas = document.getElementById('output');
-    const logDiv = document.getElementById('log');
-    let stream = null;
+    // ============================================
+    // 胶片相机 v3 · 纯 WebGL1 · 完全兼容 iOS
+    // ============================================
 
-    function log(msg, cls = '') {
-      const d = document.createElement('div');
-      if (cls) d.className = cls;
-      d.textContent = '> ' + msg;
-      logDiv.appendChild(d);
-      logDiv.scrollTop = logDiv.scrollHeight;
-      console.log(msg);
+    const video = document.getElementById('video');
+    const canvas = document.getElementById('outputCanvas');
+    const hint = document.getElementById('hint');
+
+    // 只使用 WebGL1（保证兼容性）
+    const gl = canvas.getContext('webgl', {
+      premultipliedAlpha: false,
+      preserveDrawingBuffer: true
+    });
+    if (!gl) {
+      hint.textContent = '❌ 浏览器不支持 WebGL';
+      throw new Error('No WebGL');
     }
 
-    // =========================================
-    // 第一步：测试摄像头
-    // =========================================
-    document.getElementById('btnCamera').addEventListener('click', async () => {
-      log('请求摄像头权限...');
-      try {
-        stream = await navigator.mediaDevices.getUserMedia({
-          video: { facingMode: 'environment', width: { ideal: 1280 }, height: { ideal: 960 } },
-          audio: false
-        });
-        log('✅ getUserMedia 成功', 'green');
-        log('   track 数量: ' + stream.getTracks().length);
-        log('   视频 track: ' + (stream.getVideoTracks()[0]?.label || '无'));
+    let stream = null;
+    let facingMode = 'environment';
+    let currentStyle = 'fuji'; // 'fuji' or 'ricoh'
+    let prog = null;
+    let cameraReady = false;
+    let videoTexture = null;
+    const bridgeCanvas = document.createElement('canvas');
+    const bridgeCtx = bridgeCanvas.getContext('2d');
 
-        video.style.display = 'block';
-        video.srcObject = stream;
-        await video.play();
-        log('✅ video.play() 完成', 'green');
-
-        // 等待视频元数据加载
-        await new Promise(resolve => {
-          if (video.videoWidth > 0) resolve();
-          else video.addEventListener('loadedmetadata', resolve, {once: true});
-        });
-        log('   视频尺寸: ' + video.videoWidth + 'x' + video.videoHeight);
-        log('   readyState: ' + video.readyState);
-      } catch(e) {
-        log('❌ 摄像头失败: ' + e.message, 'red');
-        log('   name: ' + e.name);
-        log('   code: ' + (e.code || '无'));
+    // ============================================
+    // WebGL1 着色器
+    // ============================================
+    const VS = `
+      attribute vec2 a_pos;
+      varying vec2 v_uv;
+      void main() {
+        gl_Position = vec4(a_pos, 0.0, 1.0);
+        v_uv = a_pos * 0.5 + 0.5;
       }
-    });
+    `;
 
-    // =========================================
-    // 第二步：测试 WebGL 渲染（从 canvas）
-    // =========================================
-    document.getElementById('btnTest').addEventListener('click', () => {
-      canvas.width = 640;
-      canvas.height = 480;
+    const FS = `
+      precision mediump float;
+      uniform sampler2D u_image;
+      uniform float u_seed;
+      uniform float u_style;
+      varying vec2 v_uv;
 
-      // 尝试 WebGL2
-      let gl = canvas.getContext('webgl2', { premultipliedAlpha: false });
-      let isGL2 = true;
-      if (!gl) {
-        gl = canvas.getContext('webgl', { premultipliedAlpha: false });
-        isGL2 = false;
-      }
-      if (!gl) {
-        log('❌ WebGL 不可用', 'red');
-        return;
-      }
-      log('✅ WebGL' + (isGL2 ? '2' : '1') + ' 已创建', 'green');
-
-      // 测试清屏
-      gl.clearColor(0.2, 0.2, 0.2, 1.0);
-      gl.clear(gl.COLOR_BUFFER_BIT);
-      log('✅ 清屏正常', 'green');
-
-      // 测试着色器
-      const vs = isGL2
-        ? '#version 300 es\nin vec2 a_pos; out vec2 v_uv; void main(){ gl_Position=vec4(a_pos,0,1); v_uv=a_pos*0.5+0.5; }'
-        : 'attribute vec2 a_pos; varying vec2 v_uv; void main(){ gl_Position=vec4(a_pos,0,1); v_uv=a_pos*0.5+0.5; }';
-
-      const fs = isGL2
-        ? '#version 300 es\nprecision highp float; in vec2 v_uv; out vec4 c; void main(){ c=vec4(v_uv,0.5,1); }'
-        : 'precision highp float; varying vec2 v_uv; void main(){ gl_FragColor=vec4(v_uv,0.5,1); }';
-
-      const vsObj = gl.createShader(gl.VERTEX_SHADER);
-      gl.shaderSource(vsObj, vs); gl.compileShader(vsObj);
-      if (!gl.getShaderParameter(vsObj, gl.COMPILE_STATUS)) {
-        log('❌ VS 编译失败: ' + gl.getShaderInfoLog(vsObj), 'red');
-        return;
+      float random(vec2 co) {
+        return fract(sin(dot(co.xy, vec2(12.9898, 78.233))) * 43758.5453);
       }
 
-      const fsObj = gl.createShader(gl.FRAGMENT_SHADER);
-      gl.shaderSource(fsObj, fs); gl.compileShader(fsObj);
-      if (!gl.getShaderParameter(fsObj, gl.COMPILE_STATUS)) {
-        log('❌ FS 编译失败: ' + gl.getShaderInfoLog(fsObj), 'red');
-        return;
+      float filmic(float x) {
+        x = clamp(x, 0.0, 1.0);
+        return (x * (1.8 * x + 0.25)) / (x * (1.8 * x + 0.45) + 0.06);
       }
 
-      const prog = gl.createProgram();
-      gl.attachShader(prog, vsObj);
-      gl.attachShader(prog, fsObj);
+      void main() {
+        vec2 uv = v_uv;
+        uv.y = 1.0 - uv.y;
+        vec4 col = texture2D(u_image, uv);
+        vec3 c = col.rgb;
+
+        c.r = filmic(c.r);
+        c.g = filmic(c.g);
+        c.b = filmic(c.b);
+
+        if (u_style < 0.5) {
+          // 富士：暖调
+          c.r = c.r * 0.94 + 0.04;
+          c.g = c.g * 0.90 + 0.06;
+          c.b = c.b * 0.86 + 0.03;
+        } else {
+          // 理光：高对比，褪色
+          c.r = pow(c.r, 1.1);
+          c.g = pow(c.g, 1.1);
+          c.b = pow(c.b, 1.1);
+          c.r += 0.02 * (1.0 - c.r);
+          c.g += 0.01;
+          c.b += 0.04 * (1.0 - c.b);
+          float gray = 0.2989 * c.r + 0.5870 * c.g + 0.1140 * c.b;
+          c.r = clamp(gray + 1.3 * (c.r - gray), 0.0, 1.0);
+          c.g = clamp(gray + 1.3 * (c.g - gray), 0.0, 1.0);
+          c.b = clamp(gray + 1.3 * (c.b - gray), 0.0, 1.0);
+        }
+
+        float luma = dot(c, vec3(0.2126, 0.7152, 0.0722));
+        float grain = (random(v_uv + u_seed) - 0.5) * mix(0.018, 0.004, smoothstep(0.0, 0.8, luma));
+        c += grain;
+
+        vec2 vig = v_uv - 0.5;
+        c *= 1.0 - dot(vig, vig) * 0.45;
+
+        c = pow(c, vec3(1.0 / 2.2));
+        gl_FragColor = vec4(c, 1.0);
+      }
+    `;
+
+    // ============================================
+    // 编译着色器
+    // ============================================
+    function initShader() {
+      const vs = gl.createShader(gl.VERTEX_SHADER);
+      gl.shaderSource(vs, VS);
+      gl.compileShader(vs);
+      if (!gl.getShaderParameter(vs, gl.COMPILE_STATUS)) {
+        hint.textContent = 'VS错误: ' + gl.getShaderInfoLog(vs);
+        return false;
+      }
+
+      const fs = gl.createShader(gl.FRAGMENT_SHADER);
+      gl.shaderSource(fs, FS);
+      gl.compileShader(fs);
+      if (!gl.getShaderParameter(fs, gl.COMPILE_STATUS)) {
+        hint.textContent = 'FS错误: ' + gl.getShaderInfoLog(fs);
+        return false;
+      }
+
+      prog = gl.createProgram();
+      gl.attachShader(prog, vs);
+      gl.attachShader(prog, fs);
       gl.linkProgram(prog);
       if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) {
-        log('❌ 链接失败: ' + gl.getProgramInfoLog(prog), 'red');
-        return;
+        hint.textContent = '链接错误: ' + gl.getProgramInfoLog(prog);
+        return false;
       }
-      log('✅ 着色器编译链接正常', 'green');
 
-      // 绘制渐变矩形
       gl.useProgram(prog);
-      const pos = new Float32Array([-1,-1, 1,-1, -1,1, 1,1]);
+
+      // 全屏四边形
       const buf = gl.createBuffer();
       gl.bindBuffer(gl.ARRAY_BUFFER, buf);
-      gl.bufferData(gl.ARRAY_BUFFER, pos, gl.STATIC_DRAW);
+      gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1,-1, 1,-1, -1,1, 1,1]), gl.STATIC_DRAW);
       const loc = gl.getAttribLocation(prog, 'a_pos');
       gl.enableVertexAttribArray(loc);
       gl.vertexAttribPointer(loc, 2, gl.FLOAT, false, 0, 0);
+
+      // 纹理
+      videoTexture = gl.createTexture();
+      gl.bindTexture(gl.TEXTURE_2D, videoTexture);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+
+      gl.uniform1i(gl.getUniformLocation(prog, 'u_image'), 0);
+
+      hint.textContent = '✅ 就绪，点击按钮启动相机';
+      return true;
+    }
+
+    // ============================================
+    // 渲染循环
+    // ============================================
+    function render() {
+      if (!cameraReady || !video.videoWidth) {
+        requestAnimationFrame(render);
+        return;
+      }
+
+      const w = video.videoWidth;
+      const h = video.videoHeight;
+      if (bridgeCanvas.width !== w || bridgeCanvas.height !== h) {
+        bridgeCanvas.width = w;
+        bridgeCanvas.height = h;
+        canvas.width = w;
+        canvas.height = h;
+        gl.viewport(0, 0, w, h);
+
+        // 初始化纹理内存
+        gl.bindTexture(gl.TEXTURE_2D, videoTexture);
+        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, w, h, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+      }
+
+      // video → 2D canvas → WebGL
+      bridgeCtx.drawImage(video, 0, 0, w, h);
+
+      gl.bindTexture(gl.TEXTURE_2D, videoTexture);
+      gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, gl.RGBA, gl.UNSIGNED_BYTE, bridgeCanvas);
+
+      gl.uniform1f(gl.getUniformLocation(prog, 'u_seed'), Math.random() * 1000);
+      gl.uniform1f(gl.getUniformLocation(prog, 'u_style'), currentStyle === 'fuji' ? 0.0 : 1.0);
+
       gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
-      log('✅ 着色器绘制完成（应看到渐变背景）', 'green');
+      requestAnimationFrame(render);
+    }
 
-      // 如果摄像头已启动，测试 video → canvas → WebGL
-      if (stream && video.videoWidth > 0) {
-        log('测试 video → canvas → WebGL 纹理...', 'yellow');
+    // ============================================
+    // 摄像头
+    // ============================================
+    async function startCamera() {
+      if (stream) stream.getTracks().forEach(t => t.stop());
+
+      try {
+        stream = await navigator.mediaDevices.getUserMedia({
+          video: { facingMode: facingMode, width: { ideal: 1280 }, height: { ideal: 960 } },
+          audio: false
+        });
+      } catch(e) {
+        // 后置失败，尝试前置
         try {
-          const bridge = document.createElement('canvas');
-          bridge.width = video.videoWidth;
-          bridge.height = video.videoHeight;
-          const ctx = bridge.getContext('2d');
-          ctx.drawImage(video, 0, 0);
-
-          gl.activeTexture(gl.TEXTURE0);
-          const tex = gl.createTexture();
-          gl.bindTexture(gl.TEXTURE_2D, tex);
-          gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
-          gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
-          gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
-          gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-
-          gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, bridge);
-          log('✅ texImage2D(canvas) 成功', 'green');
-
-          // 用 video 直传（iOS 可能不支持）
-          try {
-            gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, video);
-            log('✅ texImage2D(video) 成功', 'green');
-          } catch(e) {
-            log('⚠️ texImage2D(video) 失败: ' + e.message + '（预期内）', 'yellow');
-          }
-        } catch(e) {
-          log('❌ 纹理测试失败: ' + e.message, 'red');
+          stream = await navigator.mediaDevices.getUserMedia({
+            video: { facingMode: 'user', width: { ideal: 1280 }, height: { ideal: 960 } },
+            audio: false
+          });
+          facingMode = 'user';
+        } catch(e2) {
+          hint.textContent = '❌ 无法访问摄像头: ' + e2.message;
+          return;
         }
       }
+
+      video.srcObject = stream;
+      await video.play();
+
+      // 等待视频有实际尺寸
+      while (video.videoWidth === 0) {
+        await new Promise(r => requestAnimationFrame(r));
+      }
+
+      cameraReady = true;
+      hint.style.display = 'none';
+    }
+
+    // ============================================
+    // 拍照
+    // ============================================
+    function takePhoto() {
+      const url = canvas.toDataURL('image/jpeg', 0.95);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = 'film_' + Date.now() + '.jpg';
+      a.click();
+      if (navigator.share) {
+        canvas.toBlob(b => {
+          navigator.share({ files: [new File([b], 'photo.jpg', {type:'image/jpeg'})] });
+        }, 'image/jpeg');
+      }
+    }
+
+    // ============================================
+    // 事件
+    // ============================================
+    async function ensureCamera() {
+      if (cameraReady) return;
+      await startCamera();
+    }
+
+    document.getElementById('shutter').addEventListener('click', async () => {
+      await ensureCamera();
+      if (cameraReady) takePhoto();
     });
+
+    document.getElementById('switchCamera').addEventListener('click', async () => {
+      await ensureCamera();
+      if (!cameraReady) return;
+      facingMode = facingMode === 'environment' ? 'user' : 'environment';
+      cameraReady = false;
+      await startCamera();
+    });
+
+    document.getElementById('styleFuji').addEventListener('click', async () => {
+      await ensureCamera();
+      currentStyle = 'fuji';
+      document.getElementById('styleFuji').classList.add('active');
+      document.getElementById('styleRicoh').classList.remove('active');
+    });
+
+    document.getElementById('styleRicoh').addEventListener('click', async () => {
+      await ensureCamera();
+      currentStyle = 'ricoh';
+      document.getElementById('styleRicoh').classList.add('active');
+      document.getElementById('styleFuji').classList.remove('active');
+    });
+
+    // ============================================
+    // 启动
+    // ============================================
+    if (initShader()) {
+      render();
+    }
   </script>
 </body>
 </html>

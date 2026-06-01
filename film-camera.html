@@ -348,9 +348,9 @@
       }
       const constraints = {
         video: {
-          facingMode: { exact: facingMode },
-          width: { ideal: 3840 },
-          height: { ideal: 2160 },
+          facingMode: facingMode,
+          width: { ideal: 1920 },
+          height: { ideal: 1440 },
           frameRate: { ideal: 30 }
         },
         audio: captureMode === 'video'
@@ -360,13 +360,20 @@
         video.srcObject = currentStream;
         await video.play();
       } catch (e) {
-        console.warn('高分辨率失败，降级到默认', e);
-        currentStream = await navigator.mediaDevices.getUserMedia({
-          video: { facingMode: { exact: facingMode } },
-          audio: captureMode === 'video'
-        });
-        video.srcObject = currentStream;
-        await video.play();
+        console.warn('后置摄像头失败，尝试前置', e);
+        try {
+          currentStream = await navigator.mediaDevices.getUserMedia({
+            video: { facingMode: 'user' },
+            audio: captureMode === 'video'
+          });
+          video.srcObject = currentStream;
+          await video.play();
+          facingMode = 'user';
+        } catch (e2) {
+          console.warn('任何摄像头都不可用', e2);
+          // iOS 上首次调用需要用户手势触发
+          // 用户点击快门按钮后会自动重试
+        }
       }
     }
 
@@ -492,19 +499,34 @@
     // ========================================================
     // 11. 事件绑定
     // ========================================================
-    document.getElementById('shutter').addEventListener('click', () => {
+    document.getElementById('shutter').addEventListener('click', async () => {
+      // iOS 上摄像头必须由用户手势触发
+      if (!cameraStarted) {
+        await startCameraWithGesture();
+        if (!currentStream) {
+          alert('无法访问摄像头，请在设置中允许相机权限');
+          return;
+        }
+      }
       if (captureMode === 'photo') takePhoto();
       else toggleMode();
     });
     document.getElementById('modeLabel').addEventListener('click', toggleMode);
-    document.getElementById('switchCamera').addEventListener('click', () => {
+    document.getElementById('switchCamera').addEventListener('click', async () => {
+      if (!cameraStarted) await startCameraWithGesture();
       facingMode = facingMode === 'environment' ? 'user' : 'environment';
       startCamera();
     });
 
-    // 风格按钮
-    document.getElementById('styleFuji').addEventListener('click', () => setStyle('fuji'));
-    document.getElementById('styleRicoh').addEventListener('click', () => setStyle('ricoh'));
+    // 风格按钮（点击时同时触发摄像头启动）
+    document.getElementById('styleFuji').addEventListener('click', async () => {
+      if (!cameraStarted) await startCameraWithGesture();
+      setStyle('fuji');
+    });
+    document.getElementById('styleRicoh').addEventListener('click', async () => {
+      if (!cameraStarted) await startCameraWithGesture();
+      setStyle('ricoh');
+    });
 
     // LUT 导入
     document.getElementById('importLutBtn').addEventListener('click', () => {
@@ -520,10 +542,28 @@
     // ========================================================
     // 12. 启动
     // ========================================================
+    let cameraStarted = false;
+
+    async function startCameraWithGesture() {
+      if (cameraStarted) return;
+      cameraStarted = true;
+      await startCamera();
+    }
+
     (async () => {
       if (!initWebGL()) return;
-      await startCamera();
+      // iOS 上 getUserMedia 必须由用户手势触发
+      // 先启动渲染循环（没有视频帧时会静默等待）
       renderLoop();
+
+      // 尝试启动摄像头（可能在无手势时失败，静默处理）
+      try {
+        await startCamera();
+        cameraStarted = true;
+      } catch (e) {
+        // iOS 上首次调用会静默失败，等待用户点击启动
+        console.log('等待用户手势启动摄像头...');
+      }
     })();
   </script>
 </body>

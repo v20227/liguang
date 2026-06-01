@@ -1,0 +1,11 @@
+# 诸葛工作区 - 不要提交的杂项
+.DS_Store
+node_modules/
+*.pyc
+__pycache__/
+.env
+*.local
+
+# 只保留核心文件在版本控制中
+# zhuge-config/ 是 TypeScript 项目，在另一个仓库管理更好
+# 这里只提交胶片相机相关的内容

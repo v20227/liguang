@@ -1,0 +1,30 @@
+name: FilmCamera
+options:
+  bundleIdPrefix: com.zhuge
+  deploymentTarget:
+    iOS: "15.0"
+  xcodeVersion: "14.0"
+  generateEmptyDirectories: true
+
+settings:
+  SWIFT_VERSION: "5.7"
+  ENABLE_PREVIEWS: YES
+
+targets:
+  FilmCamera:
+    type: application
+    platform: iOS
+    sources:
+      - FilmCamera
+    settings:
+      PRODUCT_BUNDLE_IDENTIFIER: com.zhuge.filmcamera
+      INFOPLIST_FILE: FilmCamera/Info.plist
+      DEVELOPMENT_TEAM: ""
+      TARGETED_DEVICE_FAMILY: "1,2"
+    preBuildScripts:
+      - name: "Copy HTML Resources"
+        script: |
+          cp -R "$SRCROOT/FilmCamera/Resources/" "$TARGET_BUILD_DIR/$UNLOCALIZED_RESOURCES_FOLDER_PATH/"
+    dependencies: []
+    info:
+      path: FilmCamera/Info.plist
